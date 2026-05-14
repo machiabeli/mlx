@@ -81,6 +81,12 @@ class MeshGroup : public Group {
 
   MeshImpl mesh_;
   RingImpl ring_;
+
+  // Parsed from `coordinator_addr` in the constructor. Used by split() to
+  // derive a sub-group coordinator (sub_port = coordinator_port_ + 1000 +
+  // color). Stored once so split() does not have to re-parse on every call.
+  std::string coordinator_host_;
+  int coordinator_port_;
 };
 
 } // namespace jaccl

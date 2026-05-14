@@ -1,7 +1,14 @@
 // Copyright © 2026 Apple Inc.
 
 #include "jaccl/mesh.h"
+
+#include <cstdlib>
+#include <memory>
+
+#include "jaccl/local.h"
 #include "jaccl/reduction_ops.h"
+#include "jaccl/split_impl.h"
+#include "jaccl/tcp_group.h"
 #include "jaccl/types.h"
 
 namespace jaccl {
@@ -13,7 +20,21 @@ MeshGroup::MeshGroup(
     : rank_(rank),
       size_(device_names.size()),
       side_channel_(rank_, size_, coordinator_addr.c_str()),
-      connections_(create_connections(device_names)) {
+      connections_(create_connections(device_names)),
+      coordinator_port_(29500) {
+  // Parse coordinator_addr exactly once into host/port so split() can
+  // derive a sub-group coordinator without re-parsing on every call.
+  auto colon = coordinator_addr.rfind(':');
+  if (colon != std::string::npos) {
+    coordinator_host_ = coordinator_addr.substr(0, colon);
+    int parsed = std::atoi(coordinator_addr.substr(colon + 1).c_str());
+    if (parsed > 0) {
+      coordinator_port_ = parsed;
+    }
+  } else {
+    coordinator_host_ = coordinator_addr;
+  }
+
   if (size_ > MESH_MAX_PEERS) {
     std::ostringstream msg;
     msg << "[jaccl] The JACCL mesh supports up to " << MESH_MAX_PEERS
@@ -189,8 +210,32 @@ void MeshGroup::barrier() {
   all_sum(&b, &b, sizeof(b), Dtype::UInt8);
 }
 
-std::shared_ptr<Group> MeshGroup::split(int, int) {
-  throw std::runtime_error("[jaccl] MeshGroup::split() not yet implemented");
+std::shared_ptr<Group> MeshGroup::split(int color, int key) {
+  // SideChannel collectives inside compute_split MUST run on every rank in
+  // the parent group, regardless of color, to keep the SideChannel
+  // synchronized. The caller decides how to interpret the decision.
+  auto decision = detail::compute_split(
+      side_channel_,
+      rank_,
+      size_,
+      coordinator_host_,
+      coordinator_port_,
+      color,
+      key);
+
+  if (color < 0) {
+    return nullptr;
+  }
+  if (decision.new_size <= 1) {
+    return std::make_shared<LocalGroup>();
+  }
+  // Crucial: TCPGroup, NOT a recursive MeshGroup. Apple's Thunderbolt RDMA
+  // driver does not allow opening a second ibv_context on a physical device
+  // already held by this MeshGroup, so the sub-group MUST use TCP. This is
+  // also the bug fix relative to the cbfea8bb commit, which constructed a
+  // nested MeshGroup and would deadlock on the second ibv_open.
+  return std::make_shared<TCPGroup>(
+      decision.new_rank, decision.new_size, decision.sub_coordinator);
 }
 
 template <typename T, typename ReduceOp>
