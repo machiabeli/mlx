@@ -42,3 +42,7 @@ build_example(allreduce_bench.cpp)
 
 # Standalone tests (single-process, exit 0 on success)
 build_example(test_local_group.cpp)
+# Two-process TCP smoke test. Skipped from the build set until tcp_group.cpp
+# (B2) lands — the executable references jaccl::TCPGroup which has no
+# definition yet.
+# build_example(test_tcp_group_smoke.cpp)
