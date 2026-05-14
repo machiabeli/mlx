@@ -1,10 +1,12 @@
 // Copyright © 2024 Apple Inc.
 
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <future>
@@ -378,6 +380,65 @@ std::vector<int> make_connections(
 
 } // namespace
 
+// No-op communication group for size-1 sub-groups produced by RingGroup::split.
+// Identity-copy semantics on every collective; send/recv throw. Separate from
+// jaccl::LocalGroup because this layer speaks MLX `array`+`Stream`, not raw
+// pointers.
+class LocalGroup : public GroupImpl {
+ public:
+  Stream communication_stream(StreamOrDevice s) override {
+    return to_stream(s, Device::cpu);
+  }
+  int rank() override {
+    return 0;
+  }
+  int size() override {
+    return 1;
+  }
+  std::shared_ptr<GroupImpl> split(int color, int /*key*/ = -1) override {
+    if (color < 0) {
+      return nullptr;
+    }
+    return std::make_shared<LocalGroup>();
+  }
+  void all_sum(const array& input, array& output, Stream stream) override {
+    copy_input(input, output, stream);
+  }
+  void all_max(const array& input, array& output, Stream stream) override {
+    copy_input(input, output, stream);
+  }
+  void all_min(const array& input, array& output, Stream stream) override {
+    copy_input(input, output, stream);
+  }
+  void all_gather(const array& input, array& output, Stream stream) override {
+    copy_input(input, output, stream);
+  }
+  void send(const array&, int, Stream) override {
+    throw std::runtime_error("[ring] Cannot send in a size-1 group.");
+  }
+  void recv(array&, int, Stream) override {
+    throw std::runtime_error("[ring] Cannot recv in a size-1 group.");
+  }
+  void sum_scatter(const array& input, array& output, Stream stream) override {
+    copy_input(input, output, stream);
+  }
+
+ private:
+  static void copy_input(const array& input, array& output, Stream stream) {
+    auto& encoder = cpu::get_command_encoder(stream);
+    encoder.set_input_array(input);
+    encoder.set_output_array(output);
+    encoder.dispatch(
+        [in = input.data<char>(),
+         out = output.data<char>(),
+         n = input.nbytes()]() {
+          if (n > 0 && in != out) {
+            std::memcpy(out, in, n);
+          }
+        });
+  }
+};
+
 class RingGroup : public GroupImpl {
  public:
   RingGroup(
@@ -391,6 +452,10 @@ class RingGroup : public GroupImpl {
     }
 
     size_ = nodes.size();
+    // Preserve a copy of the per-rank address matrix so split() can derive
+    // sub-group node addresses with mutated ports. This is the only
+    // dependency split() has on the original construction inputs.
+    nodes_ = nodes;
     int connect_to = (rank_ + 1) % size_;
 
     // We define the connection order by having the rank_ == size_ - 1 connect
@@ -490,7 +555,120 @@ class RingGroup : public GroupImpl {
   }
 
   std::shared_ptr<GroupImpl> split(int color, int key = -1) override {
-    throw std::runtime_error("[ring] Group split not supported.");
+    // MPI_Comm_split: key < 0 falls back to the parent rank order.
+    if (key < 0) {
+      key = rank_;
+    }
+
+    // ---- Step 1: ring all-gather of (color, key) -----------------------
+    // Every rank participates. We circulate SplitInfo around the ring using
+    // sockets_right_[0] and sockets_left_[0]. SplitInfo is trivially
+    // copyable so SocketThread::send/recv can transport it as raw bytes.
+    struct SplitInfo {
+      int color;
+      int key;
+    };
+    static_assert(
+        std::is_trivially_copyable_v<SplitInfo>,
+        "SplitInfo must be trivially copyable for SocketThread send/recv");
+
+    std::vector<SplitInfo> all_info(size_);
+    all_info[rank_] = {color, key};
+
+    int sock_r = sockets_right_[0];
+    int sock_l = sockets_left_[0];
+
+    // size_-1 hops circulate every rank's entry to every other rank. At
+    // step s, this rank forwards what it has at index (rank - s) and
+    // receives the index (rank - s - 1) from the left.
+    for (int step = 0; step < size_ - 1; ++step) {
+      int send_idx = ((rank_ - step) % size_ + size_) % size_;
+      int recv_idx = ((rank_ - step - 1) % size_ + size_) % size_;
+      auto sf = comm_.send(sock_r, &all_info[send_idx], 1);
+      auto rf = comm_.recv(sock_l, &all_info[recv_idx], 1);
+      sf.wait();
+      rf.wait();
+    }
+
+    // ---- Step 2: assemble member list ---------------------------------
+    struct Member {
+      int sort_key;
+      int parent_rank;
+    };
+    std::vector<Member> members;
+    if (color >= 0) {
+      members.reserve(size_);
+      for (int i = 0; i < size_; ++i) {
+        if (all_info[i].color == color) {
+          members.push_back({all_info[i].key * size_ + i, i});
+        }
+      }
+      std::sort(
+          members.begin(), members.end(), [](const Member& a, const Member& b) {
+            return a.sort_key < b.sort_key;
+          });
+    }
+
+    int new_size = static_cast<int>(members.size());
+    int new_rank = -1;
+    for (int i = 0; i < new_size; ++i) {
+      if (members[i].parent_rank == rank_) {
+        new_rank = i;
+        break;
+      }
+    }
+
+    // ---- Step 3: build sub-ring node addresses ------------------------
+    // Copy the parent's address records for each member and offset the
+    // TCP port by (color+1)*10000 so concurrent splits on neighbouring
+    // colors do not collide with the parent or with each other. We do
+    // this even when color < 0 (to keep behaviour symmetric) but the
+    // built sub_nodes will not be used in that case.
+    int port_offset = (color + 1) * 10000;
+    std::vector<std::vector<detail::address_t>> sub_nodes(new_size);
+    for (int i = 0; i < new_size; ++i) {
+      const auto& orig = nodes_[members[i].parent_rank];
+      sub_nodes[i].resize(orig.size());
+      for (size_t j = 0; j < orig.size(); ++j) {
+        sub_nodes[i][j] = orig[j];
+        auto* sa =
+            reinterpret_cast<struct sockaddr*>(&sub_nodes[i][j].addr);
+        if (sa->sa_family == AF_INET) {
+          auto* sin = reinterpret_cast<struct sockaddr_in*>(sa);
+          sin->sin_port = htons(ntohs(sin->sin_port) + port_offset);
+        } else if (sa->sa_family == AF_INET6) {
+          auto* sin6 = reinterpret_cast<struct sockaddr_in6*>(sa);
+          sin6->sin6_port = htons(ntohs(sin6->sin6_port) + port_offset);
+        }
+      }
+    }
+
+    // ---- Step 4: ring barrier -----------------------------------------
+    // Ensure every rank has finished computing its sub-group decision
+    // before any rank starts opening new TCP sockets (which would race
+    // with the parent's accept/connect threads on the same sockets if
+    // we didn't pause here).
+    {
+      SplitInfo barrier_payload{0, 0};
+      for (int step = 0; step < size_ - 1; ++step) {
+        auto sf = comm_.send(sock_r, &barrier_payload, 1);
+        auto rf = comm_.recv(sock_l, &barrier_payload, 1);
+        sf.wait();
+        rf.wait();
+      }
+    }
+
+    // ---- Step 5: construct the sub-group ------------------------------
+    if (color < 0) {
+      // MPI_UNDEFINED: this rank is not part of any sub-group. All
+      // collectives above ran so other ranks remain in lockstep.
+      return nullptr;
+    }
+    if (new_size == 1) {
+      // No TCP sockets needed for a single member.
+      return std::make_shared<LocalGroup>();
+    }
+    return std::make_shared<RingGroup>(new_rank, sub_nodes, verbose_);
   }
 
   void all_gather(const array& input, array& output, Stream stream) override {
@@ -838,6 +1016,10 @@ class RingGroup : public GroupImpl {
   std::vector<int> sockets_left_;
 
   std::vector<char> buffers_;
+
+  // Stored for split() — original per-rank node address matrix. Used to
+  // build sub-ring nodes by copying and offsetting the port.
+  std::vector<std::vector<detail::address_t>> nodes_;
 };
 
 bool is_available() {

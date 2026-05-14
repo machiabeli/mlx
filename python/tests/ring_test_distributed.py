@@ -21,8 +21,12 @@ class TestRingDistributed(mlx_distributed_tests.MLXDistributedCommonTestCase):
         self.assertEqual(world.size(), world2.size())
         self.assertEqual(world.rank(), world2.rank())
 
-        with self.assertRaises(RuntimeError):
-            sub = world.split(world.rank() % 2)
+        # split() is now supported on the TCP ring backend (matches the
+        # JACCL backend). Same color -> sub-group of even/odd ranks.
+        sub = world.split(world.rank() % 2)
+        expected_size = (world.size() + 1 - (world.rank() % 2)) // 2
+        self.assertEqual(sub.size(), expected_size)
+        self.assertEqual(sub.rank(), world.rank() // 2)
 
     def test_all_reduce_extra(self):
         world = mx.distributed.init()
