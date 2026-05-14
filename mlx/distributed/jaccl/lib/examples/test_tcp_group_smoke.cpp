@@ -113,6 +113,8 @@ int main() {
   if (pid == 0) {
     // Child = rank 1
     int rc = run_rank(1);
+    std::cout.flush();
+    std::cerr.flush();
     std::_Exit(rc);
   }
 
