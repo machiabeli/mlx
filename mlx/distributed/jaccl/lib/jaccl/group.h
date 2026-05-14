@@ -33,6 +33,21 @@ class Group {
   virtual void barrier() = 0;
 
   /**
+   * Whether this group supports point-to-point send/recv.
+   *
+   * MLX-side wrappers that schedule send/recv on a worker thread (see
+   * mlx/distributed/jaccl/jaccl.cpp) MUST check this on the main thread
+   * before dispatching. Exceptions thrown inside the worker-thread lambda
+   * escape past nanobind's bridge and crash the process via libc++abi.
+   *
+   * Defaults to true (MeshGroup / RingGroup); TCPGroup overrides to false
+   * because TCP star topology has no peer-to-peer transport.
+   */
+  virtual bool supports_send_recv() const {
+    return true;
+  }
+
+  /**
    * Split this group into sub-groups based on color and key (MPI_Comm_split
    * semantics). All ranks in this group must call split() collectively in the
    * same order.

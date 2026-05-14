@@ -127,6 +127,15 @@ class JACCLGroup : public GroupImpl {
   }
 
   void send(const array& input, int dst, Stream stream) override {
+    // Pre-validate on the main thread. The worker-thread dispatch below
+    // CANNOT propagate exceptions: a throw inside the lambda escapes past
+    // nanobind's bridge and aborts the process via libc++abi. By checking
+    // here we surface the unsupported case as a proper Python RuntimeError
+    // visible to assertRaises(...) and try/except in user code.
+    if (!group_->supports_send_recv()) {
+      throw std::runtime_error(
+          "[jaccl] this group does not support send (TCP star topology has no peer-to-peer)");
+    }
     auto data = input.data<char>();
     size_t n_bytes = input.nbytes();
     auto& encoder = cpu::get_command_encoder(stream);
@@ -136,6 +145,11 @@ class JACCLGroup : public GroupImpl {
   }
 
   void recv(array& out, int src, Stream stream) override {
+    // Same main-thread pre-validation as send().
+    if (!group_->supports_send_recv()) {
+      throw std::runtime_error(
+          "[jaccl] this group does not support recv (TCP star topology has no peer-to-peer)");
+    }
     auto data = out.data<char>();
     size_t n_bytes = out.nbytes();
     auto& encoder = cpu::get_command_encoder(stream);

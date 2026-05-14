@@ -57,6 +57,13 @@ class TCPGroup : public Group {
   void recv(void* output, size_t n_bytes, int src) override;
   void barrier() override;
 
+  // TCP star has no peer-to-peer. Pre-checked by MLX-side wrappers on the
+  // main thread; the synchronous throws in send()/recv() remain as a defense
+  // for any direct C++ caller that ignores supports_send_recv().
+  bool supports_send_recv() const override {
+    return false;
+  }
+
   std::shared_ptr<Group> split(int color, int key) override;
 
  private:

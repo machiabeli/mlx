@@ -122,8 +122,11 @@ class TestJacclDistributed(mlx_distributed_tests.MLXDistributedCommonTestCase):
         if sub.rank() == 0:
             x = mx.array([42.0, 43.0, 44.0])
             with self.assertRaises(RuntimeError):
-                mx.distributed.send(x, dst=1, group=sub)
-                mx.eval(x)
+                # mx.distributed.send returns a new array marked with a Send
+                # primitive; we must evaluate THAT (not the input x, which is
+                # already materialized) to trigger the actual send op.
+                sent = mx.distributed.send(x, dst=1, group=sub)
+                mx.eval(sent)
         elif sub.rank() == 1:
             with self.assertRaises(RuntimeError):
                 y = mx.distributed.recv_like(mx.zeros(3), src=0, group=sub)
