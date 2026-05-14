@@ -31,6 +31,31 @@ class Group {
   virtual void send(const void* input, size_t n_bytes, int dst) = 0;
   virtual void recv(void* output, size_t n_bytes, int src) = 0;
   virtual void barrier() = 0;
+
+  /**
+   * Split this group into sub-groups based on color and key (MPI_Comm_split
+   * semantics). All ranks in this group must call split() collectively in the
+   * same order.
+   *
+   *   color: ranks with the same color end up in the same sub-group.
+   *          A negative color removes this rank from any sub-group; the
+   *          returned Group is nullptr. The rank still participates in the
+   *          parent SideChannel collectives required by split() so other
+   *          ranks remain synchronized.
+   *   key:   tiebreaker for sub-group rank ordering. Sub-group ranks are
+   *          ordered by (key, parent_rank). A negative key defaults to
+   *          parent_rank.
+   *
+   * Returns: a shared_ptr to a Group representing this rank's sub-group,
+   * or nullptr if color < 0.
+   *
+   * Implementation note: for RDMA-backed parent groups (MeshGroup,
+   * RingGroup), sub-groups always use TCP transport because Apple's
+   * Thunderbolt RDMA driver does not support multiple ibv_context
+   * instances on the same physical device. Size-1 sub-groups return
+   * a no-op LocalGroup.
+   */
+  virtual std::shared_ptr<Group> split(int color, int key = -1) = 0;
 };
 
 /**
