@@ -4,10 +4,13 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
+#include "jaccl/local.h"
 #include "jaccl/reduction_ops.h"
+#include "jaccl/split_impl.h"
 #include "jaccl/types.h"
 
 namespace jaccl {
@@ -115,9 +118,30 @@ void TCPGroup::barrier() {
   side_channel_.all_gather<int>(0);
 }
 
-std::shared_ptr<Group> TCPGroup::split(int /*color*/, int /*key*/) {
-  // Wired in Task D1 via detail::compute_split().
-  throw std::runtime_error("[jaccl] TCPGroup::split() not yet implemented");
+std::shared_ptr<Group> TCPGroup::split(int color, int key) {
+  // All three SideChannel collectives inside compute_split MUST run on every
+  // rank regardless of color, otherwise the parent SideChannel deadlocks.
+  auto decision = detail::compute_split(
+      side_channel_,
+      rank_,
+      size_,
+      coordinator_host_,
+      coordinator_port_,
+      color,
+      key);
+
+  if (color < 0) {
+    // MPI_UNDEFINED semantics: this rank is not part of any sub-group.
+    return nullptr;
+  }
+  if (decision.new_size <= 1) {
+    // Size-1 sub-group: no TCP socket needed; identity copies suffice.
+    return std::make_shared<LocalGroup>();
+  }
+  // Multi-rank sub-group: another TCPGroup. Recursive use is intentional
+  // and supported — the parent's SideChannel is independent of the child's.
+  return std::make_shared<TCPGroup>(
+      decision.new_rank, decision.new_size, decision.sub_coordinator);
 }
 
 template <typename T, typename ReduceOp>

@@ -97,6 +97,49 @@ int run_rank(int rank) {
     return 1;
   }
 
+  // ---- split() smoke ------------------------------------------------
+  // (a) Both ranks pick color 0 -> sub-group of size 2 (another TCPGroup).
+  {
+    auto sub = g.split(0, -1);
+    if (!sub) {
+      std::cerr << "rank " << rank << ": split same-color returned null\n";
+      return 1;
+    }
+    if (sub->size() != 2 || sub->rank() != rank) {
+      std::cerr << "rank " << rank << ": same-color sub bad rank/size: rank="
+                << sub->rank() << " size=" << sub->size() << "\n";
+      return 1;
+    }
+    float a = static_cast<float>(rank + 1);
+    float b = 0.0f;
+    sub->all_sum(&a, &b, sizeof(float), jaccl::Dtype::Float32);
+    if (b != 3.0f) {
+      std::cerr << "rank " << rank << ": sub all_sum got " << b
+                << ", expected 3\n";
+      return 1;
+    }
+  }
+
+  // (b) Distinct colors -> each rank gets a size-1 LocalGroup.
+  {
+    auto sub = g.split(rank, -1);
+    if (!sub) {
+      std::cerr << "rank " << rank << ": split distinct-color returned null\n";
+      return 1;
+    }
+    if (sub->size() != 1 || sub->rank() != 0) {
+      std::cerr << "rank " << rank << ": distinct-color sub bad rank/size\n";
+      return 1;
+    }
+    float a = 7.0f, b = 0.0f;
+    sub->all_sum(&a, &b, sizeof(float), jaccl::Dtype::Float32);
+    if (b != 7.0f) {
+      std::cerr << "rank " << rank << ": local sub all_sum got " << b
+                << "\n";
+      return 1;
+    }
+  }
+
   std::cout << "rank " << rank << ": TCPGroup smoke OK\n";
   return 0;
 }
