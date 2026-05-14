@@ -90,6 +90,12 @@ int main() {
   }
   CHECK(recv_threw);
 
+  // supports_send_recv() must report false so MLX-side wrappers know to
+  // pre-check on the main thread (otherwise the throws above escape past
+  // nanobind's exception bridge and abort the process via libc++abi). See
+  // mlx/distributed/jaccl/jaccl.cpp:127-160 for the matching pre-check.
+  CHECK(g.supports_send_recv() == false);
+
   // Recursive split() on the sub-group should also work (size-1 -> size-1)
   auto subsub = sub->split(0, 0);
   CHECK(subsub != nullptr);
