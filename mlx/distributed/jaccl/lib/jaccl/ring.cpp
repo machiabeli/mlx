@@ -1,7 +1,14 @@
 // Copyright © 2026 Apple Inc.
 
 #include "jaccl/ring.h"
+
+#include <cstdlib>
+#include <memory>
+
+#include "jaccl/local.h"
 #include "jaccl/reduction_ops.h"
+#include "jaccl/split_impl.h"
+#include "jaccl/tcp_group.h"
 #include "jaccl/types.h"
 
 namespace jaccl {
@@ -17,7 +24,21 @@ RingGroup::RingGroup(
       n_conns_(left_devices.size()),
       side_channel_(rank_, size_, coordinator_addr.c_str()),
       left_(create_connections(left_devices)),
-      right_(create_connections(right_devices)) {
+      right_(create_connections(right_devices)),
+      coordinator_port_(29500) {
+  // Parse coordinator_addr exactly once so split() can derive a sub-group
+  // coordinator without re-parsing on every call. Mirrors MeshGroup.
+  auto colon = coordinator_addr.rfind(':');
+  if (colon != std::string::npos) {
+    coordinator_host_ = coordinator_addr.substr(0, colon);
+    int parsed = std::atoi(coordinator_addr.substr(colon + 1).c_str());
+    if (parsed > 0) {
+      coordinator_port_ = parsed;
+    }
+  } else {
+    coordinator_host_ = coordinator_addr;
+  }
+
   if (left_.size() > RING_MAX_CONNS || right_.size() > RING_MAX_CONNS) {
     std::ostringstream msg;
     msg << "[jaccl] Up to " << RING_MAX_CONNS << " per direction supported but "
@@ -195,8 +216,32 @@ void RingGroup::barrier() {
   all_sum(&b, &b, sizeof(b), Dtype::UInt8);
 }
 
-std::shared_ptr<Group> RingGroup::split(int, int) {
-  throw std::runtime_error("[jaccl] RingGroup::split() not yet implemented");
+std::shared_ptr<Group> RingGroup::split(int color, int key) {
+  // SideChannel collectives inside compute_split MUST run on every rank in
+  // the parent group, regardless of color, to keep the SideChannel
+  // synchronized.
+  auto decision = detail::compute_split(
+      side_channel_,
+      rank_,
+      size_,
+      coordinator_host_,
+      coordinator_port_,
+      color,
+      key);
+
+  if (color < 0) {
+    return nullptr;
+  }
+  if (decision.new_size <= 1) {
+    return std::make_shared<LocalGroup>();
+  }
+  // TCPGroup, NOT a recursive RingGroup — same Thunderbolt RDMA constraint
+  // as MeshGroup::split(). The original cbfea8bb commit was tested only
+  // with the ring backend, and its RingGroup::split did construct a
+  // TCPGroup; we preserve that behaviour and additionally fix the Mesh
+  // path.
+  return std::make_shared<TCPGroup>(
+      decision.new_rank, decision.new_size, decision.sub_coordinator);
 }
 
 template <typename T, typename ReduceOp>

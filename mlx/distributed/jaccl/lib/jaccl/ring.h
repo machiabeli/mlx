@@ -81,6 +81,12 @@ class RingGroup : public Group {
   std::vector<SharedBuffer> send_buffers_;
   std::vector<SharedBuffer> recv_buffers_;
   RingImpl ring_;
+
+  // Parsed from `coordinator_addr` in the constructor. Used by split() to
+  // derive a sub-group coordinator (sub_port = coordinator_port_ + 1000 +
+  // color). Mirrors the same fields on MeshGroup.
+  std::string coordinator_host_;
+  int coordinator_port_;
 };
 
 } // namespace jaccl
