@@ -149,7 +149,15 @@ class JACCLGroup : public GroupImpl {
   }
 
   std::shared_ptr<GroupImpl> split(int color, int key = -1) override {
-    throw std::runtime_error("[jaccl] Group split not supported.");
+    auto sub = group_->split(color, key);
+    if (!sub) {
+      // color < 0 (MPI_UNDEFINED): this rank is not part of any sub-group.
+      return nullptr;
+    }
+    // Wrap the new jaccl::Group back into a JACCLGroup so MLX sees a
+    // GroupImpl. The sub-group's transport (TCP vs Local) is opaque to
+    // MLX — it just calls the virtual methods.
+    return std::make_shared<JACCLGroup>(std::move(sub));
   }
 
  private:
