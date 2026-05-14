@@ -37,6 +37,14 @@ class LocalGroup : public Group {
   void recv(void* output, size_t n_bytes, int src) override;
   void barrier() override {}
 
+  // Size-1 group has no peer; send/recv synchronously throw. Override the
+  // default `true` so MLX-side wrappers pre-check on the main thread (the
+  // worker-thread lambda would otherwise escape past nanobind's exception
+  // bridge and abort via libc++abi — same pattern as TCPGroup).
+  bool supports_send_recv() const override {
+    return false;
+  }
+
   std::shared_ptr<Group> split(int color, int key) override;
 };
 
