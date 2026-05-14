@@ -2,8 +2,15 @@
 
 #include "jaccl/split_impl.h"
 
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -28,6 +35,63 @@ struct Member {
   int sort_key;
   int parent_rank;
 };
+
+// Detect the local LAN IPv4 reachable by peers in the cluster.
+//
+// Each rank in a JACCL parent group lives on a different host, so when a sub-
+// group's coordinator binds its listening socket, it MUST bind on a local
+// interface — not on the parent group's coordinator IP (which belongs to a
+// different host on a different machine).
+//
+// The original cbfea8bb implementation fell back to `parent_coord_host` if
+// MLX_JACCL_MY_IP wasn't set, which only worked when the sub-coordinator
+// happened to be the same rank as the parent coordinator. This helper closes
+// that gap by auto-discovering the local LAN IP via getifaddrs(2).
+//
+// Preference order (matches `python/mlx/_distributed_utils/config.py:52-61`
+// which uses `ipconfig getifaddr en0 || ipconfig getifaddr en1`):
+//   1. en0 (canonical wired/wifi on macOS Mac Studio / MacBook)
+//   2. en1 (secondary; some configs route through en1)
+//   3. any other en*  (Thunderbolt bridge ports come up as enN — useful
+//                      fallback if the host has no Ethernet/Wi-Fi)
+//
+// Returns empty string on failure, in which case the caller may fall back
+// to `parent_coord_host` (which still produces a working sub-group when
+// every rank shares that host — i.e. local single-host test setups).
+std::string get_local_ipv4() {
+  struct ifaddrs* ifap = nullptr;
+  if (getifaddrs(&ifap) != 0) {
+    return std::string();
+  }
+
+  std::string result;
+  for (int pass = 0; pass < 3 && result.empty(); ++pass) {
+    for (struct ifaddrs* ifa = ifap; ifa; ifa = ifa->ifa_next) {
+      if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+      if (!(ifa->ifa_flags & IFF_UP)) continue;
+      if (ifa->ifa_flags & IFF_LOOPBACK) continue;
+      const char* name = ifa->ifa_name ? ifa->ifa_name : "";
+      bool match = false;
+      if (pass == 0) {
+        match = (std::strcmp(name, "en0") == 0);
+      } else if (pass == 1) {
+        match = (std::strcmp(name, "en1") == 0);
+      } else { // pass == 2: any other enN
+        match = (std::strncmp(name, "en", 2) == 0);
+      }
+      if (!match) continue;
+      char buf[INET_ADDRSTRLEN] = {0};
+      auto* addr = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
+      if (inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf))) {
+        result = buf;
+        break;
+      }
+    }
+  }
+
+  freeifaddrs(ifap);
+  return result;
+}
 
 } // namespace
 
@@ -68,8 +132,20 @@ SplitDecision compute_split(
   // ---- Step 2: all_gather of advertised IPs ----------------------------
   // Every rank must participate, even those with color < 0 — otherwise
   // SideChannel deadlocks waiting on this rank's payload.
+  //
+  // Each rank reports its OWN local LAN IP, not the parent coordinator's IP.
+  // Discovery order: env override → getifaddrs(en0/en1/en*) → parent
+  // coordinator (only correct for single-host test setups).
   const char* env_ip = std::getenv("MLX_JACCL_MY_IP");
-  std::string my_ip = env_ip ? std::string(env_ip) : parent_coord_host;
+  std::string my_ip;
+  if (env_ip) {
+    my_ip = env_ip;
+  } else {
+    my_ip = get_local_ipv4();
+    if (my_ip.empty()) {
+      my_ip = parent_coord_host;
+    }
+  }
   std::vector<std::string> all_ips =
       parent_side_channel.all_gather(my_ip);
 
