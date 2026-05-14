@@ -47,6 +47,7 @@ add_library(
   jaccl
   ${CMAKE_CURRENT_SOURCE_DIR}/jaccl/tcp.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/jaccl/rdma.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/jaccl/local.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/jaccl/mesh.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/jaccl/ring.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/jaccl/jaccl.cpp)

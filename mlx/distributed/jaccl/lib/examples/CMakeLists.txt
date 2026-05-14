@@ -39,3 +39,6 @@ build_example(minimal_barrier.cpp)
 
 # Benchmarks
 build_example(allreduce_bench.cpp)
+
+# Standalone tests (single-process, exit 0 on success)
+build_example(test_local_group.cpp)
