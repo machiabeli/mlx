@@ -50,6 +50,8 @@ class RingGroup : public Group {
 
   void barrier() override;
 
+  std::shared_ptr<Group> split(int color, int key) override;
+
  private:
   template <typename T, typename ReduceOp>
   void all_reduce(

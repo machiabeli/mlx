@@ -189,6 +189,10 @@ void MeshGroup::barrier() {
   all_sum(&b, &b, sizeof(b), Dtype::UInt8);
 }
 
+std::shared_ptr<Group> MeshGroup::split(int, int) {
+  throw std::runtime_error("[jaccl] MeshGroup::split() not yet implemented");
+}
+
 template <typename T, typename ReduceOp>
 void MeshGroup::all_reduce(
     const void* input,

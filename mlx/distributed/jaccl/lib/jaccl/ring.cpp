@@ -195,6 +195,10 @@ void RingGroup::barrier() {
   all_sum(&b, &b, sizeof(b), Dtype::UInt8);
 }
 
+std::shared_ptr<Group> RingGroup::split(int, int) {
+  throw std::runtime_error("[jaccl] RingGroup::split() not yet implemented");
+}
+
 template <typename T, typename ReduceOp>
 void RingGroup::all_reduce(
     const void* input,
